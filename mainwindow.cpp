@@ -1,3 +1,83 @@
+/**
+ * @file mainwindow.cpp
+ * @brief Implementation of the MainWindow class for handling STL file visualization and VR interaction.
+ *
+ * This file defines the main window UI logic for managing STL file loading, rendering using VTK,
+ * and VR rendering in a Qt application.
+ */
+
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include "ModelPart.h"
+#include "ModelPartList.h"
+#include "optiondialog.h"
+#include "VRRenderThread.h"
+
+ // Qt includes
+#include <QFileDialog>
+#include <QMenu>
+#include <QMessageBox>
+#include <QFileInfo>
+#include <QDir>
+#include <QFileInfoList>
+#include <QDebug>
+
+// VTK includes
+#include <vtkGenericOpenGLRenderWindow.h>
+#include <vtkRenderer.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkActor.h>
+#include <vtkProperty.h>
+#include <vtkCamera.h>
+#include <vtkNew.h>
+#include <vtkSmartPointer.h>
+#include <vtkNamedColors.h>
+#include <vtkCylinderSource.h>
+#include <vtkSTLReader.h>
+#include <vtkDataSetMapper.h>
+#include <vtkCallbackCommand.h>
+
+/**
+ * @brief Constructs the MainWindow and sets up UI components and signal connections.
+ *
+ * This constructor initializes the main window, sets up the user interface using the provided `ui` object,
+ * establishes signal-slot connections for various UI elements, initializes the model part list and tree view,
+ * sets up the VTK rendering environment, and potentially starts the VR rendering thread.
+ *
+ * @param parent The parent widget for this main window, typically `nullptr` for the top-level window.
+ */
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent), ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+
+    // --- Connect UI buttons to their respective slot functions ---
+    connect(ui->addButton, &QPushButton::released, this, &MainWindow::handleButton);
+    connect(ui->openOptions, &QPushButton::released, this, &MainWindow::handleOpenOptions);
+    connect(this, &MainWindow::statusUpdateMessageSignal, ui->statusbar, &QStatusBar::showMessage);
+    connect(ui->startVRButton, &QPushButton::clicked, this, &MainWindow::handleStartVR);
+    connect(ui->stopVRButton, &QPushButton::clicked, this, &MainWindow::handleStopVR);
+
+    // --- Set up tree view with model part list ---
+    this->partList = new ModelPartList("PartsList");
+    ui->treeView->setModel(this->partList);
+    ui->treeView->addAction(ui->actionItemOptions);
+    ui->treeView->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(ui->treeView, &QTreeView::customContextMenuRequested, this, &MainWindow::showContextMenu);
+    connect(ui->treeView, &QTreeView::clicked, this, &MainWindow::handleTreeClicked);
+
+    // --- Setup menu actions ---
+    connect(ui->actionOpenSingleFile, &QAction::triggered, this, &MainWindow::on_actionOpenSingleFile_triggered);
+    connect(ui->actionClearTreeView, &QAction::triggered, this, &MainWindow::on_actionClearTreeView_triggered);
+
+    // --- Initialize VTK renderer ---
+    setupVTK();
+
+    // Emit initial status message
+    emit statusUpdateMessageSignal("Loaded Level0 parts (invisible)", 2000);
+
+    // Start VR thread
+    vrThread = new VRRenderThread(this);
 }
 
 /**
@@ -22,18 +102,21 @@ void MainWindow::setupVTK()
         qWarning("vtkWidget is not initialized in the UI file!");
         return;
     }
+
     renderWindow = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
     ui->vtkWidget->setRenderWindow(renderWindow);
+
     renderer = vtkSmartPointer<vtkRenderer>::New();
     renderWindow->AddRenderer(renderer);
-    renderer->SetBackground(0.1, 0.1, 0.1);
+
+    renderer->SetBackground(0.1, 0.1, 0.1); // Dark background
     renderWindow->Render();
 }
 
 /**
  * @brief Updates the status bar with a message.
- * @param message Message to display.
- * @param timeout Duration in milliseconds.
+ * @param message The message to display.
+ * @param timeout Duration in milliseconds to display the message.
  */
 void MainWindow::statusUpdateMessage(const QString& message, int timeout)
 {
@@ -41,7 +124,8 @@ void MainWindow::statusUpdateMessage(const QString& message, int timeout)
 }
 
 /**
- * @brief Dummy button used for initial testing.
+ * @brief Dummy handler for add button.
+ * Displays a message box and emits a status message.
  */
 void MainWindow::handleButton()
 {
@@ -73,8 +157,10 @@ void MainWindow::on_actionItemOptions_triggered()
         QColor chosenColor = optionDialog.getColor();
         selectedPart->setColour(chosenColor.red(), chosenColor.green(), chosenColor.blue());
 
+        // Placeholder for future VR actor update logic
         if (vrThread && vrThread->isRunning()) {
             vtkActor* actor = selectedPart->getActor();
+            // TODO: Implement actor update in VR thread
         }
 
         selectedPart->setVisible(optionDialog.isVisible());
@@ -85,7 +171,7 @@ void MainWindow::on_actionItemOptions_triggered()
 }
 
 /**
- * @brief Opens the option dialog (for testing purposes).
+ * @brief Opens a test OptionDialog, typically for UI testing.
  */
 void MainWindow::handleOpenOptions()
 {
@@ -109,7 +195,7 @@ void MainWindow::handleTreeClicked()
 }
 
 /**
- * @brief Handles opening a directory and loading all STL files within.
+ * @brief Handles folder selection and loads all STL files within.
  */
 void MainWindow::on_actionOpenFile_triggered()
 {
@@ -123,8 +209,8 @@ void MainWindow::on_actionOpenFile_triggered()
 }
 
 /**
- * @brief Shows a context menu when right-clicking on a tree view item.
- * @param pos The position in the tree view.
+ * @brief Shows a context menu for the tree view.
+ * @param pos Position of the right-click event.
  */
 void MainWindow::showContextMenu(const QPoint& pos)
 {
@@ -138,12 +224,13 @@ void MainWindow::showContextMenu(const QPoint& pos)
 }
 
 /**
- * @brief Updates the render window with currently visible parts.
+ * @brief Updates the render window with all currently visible model parts.
  */
 void MainWindow::updateRender()
 {
     renderer->RemoveAllViewProps();
     int topLevelCount = partList->rowCount(QModelIndex());
+
     for (int i = 0; i < topLevelCount; ++i) {
         QModelIndex topIndex = partList->index(i, 0, QModelIndex());
         updateRenderFromTree(topIndex);
@@ -157,7 +244,7 @@ void MainWindow::updateRender()
 }
 
 /**
- * @brief Recursively adds visible parts to the VTK renderer.
+ * @brief Recursively adds visible parts to the VTK renderer from the model tree.
  * @param index Current index in the model tree.
  */
 void MainWindow::updateRenderFromTree(const QModelIndex& index)
@@ -168,7 +255,6 @@ void MainWindow::updateRenderFromTree(const QModelIndex& index)
 
     if (selectedPart && selectedPart->visible()) {
         vtkSmartPointer<vtkActor> actor = selectedPart->getActor();
-
         if (actor) {
             renderer->AddActor(actor);
         }
@@ -181,8 +267,8 @@ void MainWindow::updateRenderFromTree(const QModelIndex& index)
 }
 
 /**
- * @brief Loads model parts from the given folder and its subfolders.
- * @param folderPath The path to the directory.
+ * @brief Loads STL model parts from the given directory recursively.
+ * @param folderPath The path to the root directory.
  */
 void MainWindow::loadInitialPartsFromFolder(const QString& folderPath)
 {
